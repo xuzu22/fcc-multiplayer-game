@@ -4,11 +4,20 @@ const bodyParser = require('body-parser');
 const expect = require('chai');
 const socket = require('socket.io');
 const cors = require('cors');
+const helmet = require('helmet');
 
 const fccTestingRoutes = require('./routes/fcctesting.js');
 const runner = require('./test-runner.js');
 
+const Collectible = require('./public/Collectible.mjs').default || require('./public/Collectible.mjs');
+const Player = require('./public/Player.mjs').default || require('./public/Player.mjs');
+
 const app = express();
+
+app.use(helmet.noSniff());
+app.use(helmet.xssFilter());
+app.use(helmet.noCache());
+app.use(helmet.hidePoweredBy({ setTo: 'PHP 7.4.3' }));
 
 app.use('/public', express.static(process.cwd() + '/public'));
 app.use('/assets', express.static(process.cwd() + '/assets'));
@@ -51,6 +60,72 @@ const server = app.listen(portNum, () => {
       }
     }, 1500);
   }
+});
+
+const io = socket(server);
+
+let players = [];
+
+function generateCollectible() {
+  const minX = 50;
+  const maxX = 590;
+  const minY = 80;
+  const maxY = 430;
+  const x = Math.floor(Math.random() * (maxX - minX + 1)) + minX;
+  const y = Math.floor(Math.random() * (maxY - minY + 1)) + minY;
+  return new Collectible({ x, y, value: 1, id: Date.now().toString() });
+}
+
+let collectible = generateCollectible();
+
+io.on('connection', (socket) => {
+  const startX = Math.floor(Math.random() * 500) + 50;
+  const startY = Math.floor(Math.random() * 350) + 80;
+  const newPlayer = new Player({ x: startX, y: startY, score: 0, id: socket.id });
+
+  players.push(newPlayer);
+
+  socket.emit('init', {
+    id: socket.id,
+    players: players,
+    collectible: collectible
+  });
+
+  socket.broadcast.emit('new-player', newPlayer);
+
+  socket.on('move-player', (dir, speed = 5) => {
+    const player = players.find(p => p.id === socket.id);
+    if (player) {
+      player.movePlayer(dir, speed);
+
+      const minX = 10;
+      const maxX = 600;
+      const minY = 60;
+      const maxY = 440;
+
+      if (player.x < minX) player.x = minX;
+      if (player.x > maxX) player.x = maxX;
+      if (player.y < minY) player.y = minY;
+      if (player.y > maxY) player.y = maxY;
+
+      if (player.collision(collectible)) {
+        player.score += collectible.value;
+        collectible = generateCollectible();
+
+        io.emit('update-collectible', {
+          collectible: collectible,
+          player: player
+        });
+      }
+
+      io.emit('player-moved', player);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    players = players.filter(p => p.id !== socket.id);
+    io.emit('remove-player', socket.id);
+  });
 });
 
 module.exports = app; // For testing
