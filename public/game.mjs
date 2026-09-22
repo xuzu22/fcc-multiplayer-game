@@ -16,7 +16,9 @@ let allPlayers = [];
 let grid = new Array(COLS * ROWS).fill(0);
 let collectible = null;
 let roundTime = 60;
-let roundStatus = 'running';
+let roundStatus = 'waiting';
+let lobbyCountdown = 3;
+let minPlayers = 2;
 let winnerInfo = null;
 
 socket.on('init', (data) => {
@@ -26,6 +28,8 @@ socket.on('init', (data) => {
   if (data.collectible) collectible = new Collectible(data.collectible);
   roundTime = data.roundTime;
   roundStatus = data.roundStatus;
+  lobbyCountdown = data.lobbyCountdown || 3;
+  minPlayers = data.minPlayers || 2;
 });
 
 socket.on('game-tick', (data) => {
@@ -49,6 +53,17 @@ socket.on('game-tick', (data) => {
 
   roundTime = data.roundTime;
   roundStatus = data.roundStatus;
+  if (data.lobbyCountdown !== undefined) lobbyCountdown = data.lobbyCountdown;
+});
+
+socket.on('lobby-countdown', (data) => {
+  roundStatus = 'starting';
+  lobbyCountdown = data.countdown;
+});
+
+socket.on('round-waiting', (data) => {
+  roundStatus = 'waiting';
+  minPlayers = data.minPlayers;
 });
 
 socket.on('round-reset', (data) => {
@@ -324,23 +339,35 @@ function render(timestamp) {
   ctx.fillStyle = '#0f172a';
   ctx.fillRect(0, 0, canvas.width, 50);
 
-  // 1-Minute Countdown Timer Badge (3D Center Pill)
-  const timerSec = Math.max(0, roundTime);
-  const timerColor = timerSec <= 10 ? '#ef4444' : '#38bdf8';
+  // Center Pill Badge (Timer / Lobby status)
+  let timerText = '';
+  let timerColor = '#38bdf8';
 
+  if (roundStatus === 'waiting') {
+    timerText = `LOBBY (${allPlayers.length}/${minPlayers})`;
+    timerColor = '#f59e0b';
+  } else if (roundStatus === 'starting') {
+    timerText = `START: ${lobbyCountdown}`;
+    timerColor = '#10b981';
+  } else {
+    const timerSec = Math.max(0, roundTime);
+    timerColor = timerSec <= 10 ? '#ef4444' : '#38bdf8';
+    const min = Math.floor(timerSec / 60);
+    const sec = timerSec % 60;
+    timerText = `${min}:${sec < 10 ? '0' : ''}${sec}`;
+  }
+
+  const pillW = roundStatus === 'waiting' ? 160 : 120;
   ctx.fillStyle = '#1e293b';
-  ctx.fillRect(canvas.width / 2 - 60, 8, 120, 32);
+  ctx.fillRect(canvas.width / 2 - pillW / 2, 8, pillW, 32);
   ctx.strokeStyle = timerColor;
   ctx.lineWidth = 2;
-  ctx.strokeRect(canvas.width / 2 - 60, 8, 120, 32);
+  ctx.strokeRect(canvas.width / 2 - pillW / 2, 8, pillW, 32);
 
-  ctx.font = '12px "Press Start 2P", monospace';
+  ctx.font = roundStatus === 'waiting' ? '9px "Press Start 2P", monospace' : '12px "Press Start 2P", monospace';
   ctx.textAlign = 'center';
   ctx.fillStyle = timerColor;
-  const min = Math.floor(timerSec / 60);
-  const sec = timerSec % 60;
-  const timeStr = `${min}:${sec < 10 ? '0' : ''}${sec}`;
-  ctx.fillText(timeStr, canvas.width / 2, 29);
+  ctx.fillText(timerText, canvas.width / 2, 28);
 
   // Left Info: My Score & Rank
   const me = allPlayers.find(p => p.id === myId);
@@ -369,6 +396,64 @@ function render(timestamp) {
   }
   ctx.fillStyle = '#94a3b8';
   ctx.fillText(`Players: ${allPlayers.length}`, canvas.width - 14, 38);
+
+  // Lobby Overlay: Waiting for 2-3 players
+  if (roundStatus === 'waiting') {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // 3D Lobby Card
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(canvas.width / 2 - 180, canvas.height / 2 - 80, 360, 160);
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(canvas.width / 2 - 180, canvas.height / 2 - 80, 360, 160);
+
+    ctx.textAlign = 'center';
+    ctx.font = '14px "Press Start 2P", monospace';
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillText('GAME LOBBY', canvas.width / 2, canvas.height / 2 - 45);
+
+    ctx.font = '9px "Press Start 2P", monospace';
+    ctx.fillStyle = '#facc15';
+    ctx.fillText(`PLAYERS JOINED: ${allPlayers.length} / ${minPlayers}`, canvas.width / 2, canvas.height / 2 - 15);
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '8px "Press Start 2P", monospace';
+    ctx.fillText('Waiting for 2 or 3 players to start...', canvas.width / 2, canvas.height / 2 + 15);
+
+    // Render joined player color chips
+    allPlayers.forEach((p, idx) => {
+      const chipX = canvas.width / 2 - (allPlayers.length * 40) / 2 + idx * 40 + 10;
+      const chipY = canvas.height / 2 + 35;
+      ctx.fillStyle = p.color ? p.color.main : '#38bdf8';
+      ctx.fillRect(chipX, chipY, 20, 20);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(chipX, chipY, 20, 20);
+    });
+  }
+
+  // Starting Overlay: 3s Countdown
+  if (roundStatus === 'starting') {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(canvas.width / 2 - 140, canvas.height / 2 - 50, 280, 100);
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(canvas.width / 2 - 140, canvas.height / 2 - 50, 280, 100);
+
+    ctx.textAlign = 'center';
+    ctx.font = '10px "Press Start 2P", monospace';
+    ctx.fillStyle = '#e2e8f0';
+    ctx.fillText('MATCH STARTING IN', canvas.width / 2, canvas.height / 2 - 15);
+
+    ctx.font = '28px "Press Start 2P", monospace';
+    ctx.fillStyle = '#4ade80';
+    ctx.fillText(`${lobbyCountdown}`, canvas.width / 2, canvas.height / 2 + 25);
+  }
 
   // Round Ended Overlay Banner
   if (roundStatus === 'ended') {

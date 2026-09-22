@@ -71,10 +71,13 @@ const COLORS = [
   { main: '#ec4899', dark: '#be185d', light: '#fbcfe8' }  // Pink
 ];
 
+const MIN_PLAYERS = 2;
 let grid = new Array(COLS * ROWS).fill(0);
 let players = [];
 let roundTime = 60; // 1-minute countdown
-let roundStatus = 'running'; // 'running' | 'ended'
+let roundStatus = 'waiting'; // 'waiting' | 'starting' | 'running' | 'ended'
+let lobbyCountdown = 3;
+let lobbyTimer = null;
 let winner = null;
 let gridChanges = [];
 
@@ -149,6 +152,38 @@ function fillTerritory(player) {
   }
   player.score = count;
   player.trail = [];
+}
+
+function checkLobbyStatus() {
+  if (players.length >= MIN_PLAYERS) {
+    if (roundStatus === 'waiting') {
+      roundStatus = 'starting';
+      lobbyCountdown = 3;
+      if (lobbyTimer) clearInterval(lobbyTimer);
+      lobbyTimer = setInterval(() => {
+        lobbyCountdown--;
+        io.emit('lobby-countdown', { countdown: lobbyCountdown });
+        if (lobbyCountdown <= 0) {
+          clearInterval(lobbyTimer);
+          lobbyTimer = null;
+          resetRound();
+        }
+      }, 1000);
+      io.emit('lobby-countdown', { countdown: lobbyCountdown });
+    }
+  } else {
+    if (lobbyTimer) {
+      clearInterval(lobbyTimer);
+      lobbyTimer = null;
+    }
+    if (roundStatus !== 'waiting') {
+      roundStatus = 'waiting';
+      io.emit('round-waiting', {
+        minPlayers: MIN_PLAYERS,
+        currentPlayers: players.length
+      });
+    }
+  }
 }
 
 function resetRound() {
@@ -300,7 +335,8 @@ setInterval(() => {
     })),
     gridChanges: gridChanges,
     roundTime: roundTime,
-    roundStatus: roundStatus
+    roundStatus: roundStatus,
+    lobbyCountdown: lobbyCountdown
   });
 
   gridChanges = [];
@@ -320,10 +356,13 @@ io.on('connection', (socket) => {
     players: players,
     collectible: collectible,
     roundTime: roundTime,
-    roundStatus: roundStatus
+    roundStatus: roundStatus,
+    lobbyCountdown: lobbyCountdown,
+    minPlayers: MIN_PLAYERS
   });
 
   socket.broadcast.emit('new-player', newPlayer);
+  checkLobbyStatus();
 
   socket.on('change-dir', (newDir) => {
     const player = players.find(p => p.id === socket.id);
@@ -347,6 +386,7 @@ io.on('connection', (socket) => {
     clearPlayerTerritory(socket.id);
     players = players.filter(p => p.id !== socket.id);
     io.emit('remove-player', socket.id);
+    checkLobbyStatus();
   });
 });
 
