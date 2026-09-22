@@ -4,9 +4,14 @@ class Player {
     this.y = y;
     this.score = score;
     this.id = id;
+    this.dir = 'right';
+    this.trail = [];
+    this.color = null;
+    this.isAlive = true;
   }
 
-  movePlayer(dir, speed) {
+  movePlayer(dir, speed = 5) {
+    this.dir = dir;
     if (dir === 'up') this.y -= speed;
     if (dir === 'down') this.y += speed;
     if (dir === 'left') this.x -= speed;

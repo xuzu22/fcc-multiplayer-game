@@ -3,193 +3,404 @@ import Collectible from './Collectible.mjs';
 
 const socket = io();
 const canvas = document.getElementById('game-window');
-const context = canvas.getContext('2d');
+const ctx = canvas.getContext('2d');
 
-let currPlayer = null;
+const COLS = 60;
+const ROWS = 40;
+const CELL_SIZE = 10;
+const OFFSET_X = 20;
+const OFFSET_Y = 60;
+
+let myId = null;
 let allPlayers = [];
+let grid = new Array(COLS * ROWS).fill(0);
 let collectible = null;
+let roundTime = 60;
+let roundStatus = 'running';
+let winnerInfo = null;
 
-socket.on('init', ({ id, players, collectible: item }) => {
-  allPlayers = players.map(p => new Player(p));
-  currPlayer = allPlayers.find(p => p.id === id);
-  if (item) {
-    collectible = new Collectible(item);
+socket.on('init', (data) => {
+  myId = data.id;
+  allPlayers = data.players.map(p => new Player(p));
+  if (data.grid) grid = [...data.grid];
+  if (data.collectible) collectible = new Collectible(data.collectible);
+  roundTime = data.roundTime;
+  roundStatus = data.roundStatus;
+});
+
+socket.on('game-tick', (data) => {
+  allPlayers = data.players.map(p => {
+    const pl = new Player(p);
+    pl.dir = p.dir;
+    pl.trail = p.trail || [];
+    pl.color = p.color;
+    pl.isAlive = p.isAlive;
+    return pl;
+  });
+
+  if (data.gridChanges && data.gridChanges.length > 0) {
+    data.gridChanges.forEach(ch => {
+      const idx = ch.r * COLS + ch.c;
+      if (idx >= 0 && idx < grid.length) {
+        grid[idx] = ch.id;
+      }
+    });
   }
+
+  roundTime = data.roundTime;
+  roundStatus = data.roundStatus;
 });
 
-socket.on('new-player', (playerData) => {
-  if (!allPlayers.some(p => p.id === playerData.id)) {
-    allPlayers.push(new Player(playerData));
-  }
+socket.on('round-reset', (data) => {
+  grid = [...data.grid];
+  allPlayers = data.players.map(p => new Player(p));
+  if (data.collectible) collectible = new Collectible(data.collectible);
+  roundTime = data.roundTime;
+  roundStatus = 'running';
+  winnerInfo = null;
 });
 
-socket.on('player-moved', (playerData) => {
-  const player = allPlayers.find(p => p.id === playerData.id);
-  if (player) {
-    player.x = playerData.x;
-    player.y = playerData.y;
-    player.score = playerData.score;
-  }
+socket.on('round-ended', (data) => {
+  roundStatus = 'ended';
+  winnerInfo = data.winner;
 });
 
-socket.on('update-collectible', ({ collectible: newItem, player: updatedPlayer }) => {
-  collectible = new Collectible(newItem);
-  const player = allPlayers.find(p => p.id === updatedPlayer.id);
-  if (player) {
-    player.score = updatedPlayer.score;
-  }
+socket.on('update-collectible', (data) => {
+  collectible = new Collectible(data.collectible);
 });
 
-socket.on('remove-player', (id) => {
-  allPlayers = allPlayers.filter(p => p.id !== id);
+socket.on('player-cut', (data) => {
+  // Visual kill feedback
 });
 
-const keyMap = {
-  ArrowUp: 'up',
-  KeyW: 'up',
-  w: 'up',
-  W: 'up',
-  ArrowDown: 'down',
-  KeyS: 'down',
-  s: 'down',
-  S: 'down',
-  ArrowLeft: 'left',
-  KeyA: 'left',
-  a: 'left',
-  A: 'left',
-  ArrowRight: 'right',
-  KeyD: 'right',
-  d: 'right',
-  D: 'right'
+// Controls (WASD / Arrows to steer)
+const keyDir = {
+  ArrowUp: 'up', KeyW: 'up', w: 'up', W: 'up',
+  ArrowDown: 'down', KeyS: 'down', s: 'down', S: 'down',
+  ArrowLeft: 'left', KeyA: 'left', a: 'left', A: 'left',
+  ArrowRight: 'right', KeyD: 'right', d: 'right', D: 'right'
 };
 
-const keysPressed = {};
-
 window.addEventListener('keydown', (e) => {
-  const dir = keyMap[e.code] || keyMap[e.key];
+  const dir = keyDir[e.code] || keyDir[e.key];
   if (dir) {
-    keysPressed[dir] = true;
+    socket.emit('change-dir', dir);
   }
 });
 
-window.addEventListener('keyup', (e) => {
-  const dir = keyMap[e.code] || keyMap[e.key];
-  if (dir) {
-    keysPressed[dir] = false;
-  }
-});
+// Helper for color shading
+function hexToRgba(hex, alpha) {
+  let c = hex.replace('#', '');
+  if (c.length === 3) c = c.split('').map(x => x + x).join('');
+  const num = parseInt(c, 16);
+  return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
+}
 
-let lastMoveTime = 0;
-function handleMovement() {
-  if (!currPlayer) return;
-  const now = Date.now();
-  if (now - lastMoveTime < 30) return; // ~30 fps movement rate limit
-  lastMoveTime = now;
+// 3D Isometric Extrusion Box
+function draw3DBox(x, y, w, h, depth, topColor, sideColor, frontColor) {
+  // Drop Shadow
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+  ctx.fillRect(x + depth, y + depth, w, h);
 
-  const speed = 5;
-  ['up', 'down', 'left', 'right'].forEach(dir => {
-    if (keysPressed[dir]) {
-      currPlayer.movePlayer(dir, speed);
+  // Front face
+  ctx.fillStyle = frontColor;
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x + w, y + h);
+  ctx.lineTo(x + w, y + h + depth);
+  ctx.lineTo(x, y + h + depth);
+  ctx.closePath();
+  ctx.fill();
 
-      const minX = 10;
-      const maxX = 600;
-      const minY = 60;
-      const maxY = 440;
+  // Side face (right)
+  ctx.fillStyle = sideColor;
+  ctx.beginPath();
+  ctx.moveTo(x + w, y);
+  ctx.lineTo(x + w + depth, y - depth);
+  ctx.lineTo(x + w + depth, y + h);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
 
-      if (currPlayer.x < minX) currPlayer.x = minX;
-      if (currPlayer.x > maxX) currPlayer.x = maxX;
-      if (currPlayer.y < minY) currPlayer.y = minY;
-      if (currPlayer.y > maxY) currPlayer.y = maxY;
+  // Top face
+  ctx.fillStyle = topColor;
+  ctx.fillRect(x, y, w, h);
+}
 
-      socket.emit('move-player', dir, speed);
+function drawTerritory() {
+  const playerMap = {};
+  allPlayers.forEach(p => { playerMap[p.id] = p; });
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const ownerId = grid[r * COLS + c];
+      if (ownerId !== 0) {
+        const owner = playerMap[ownerId];
+        const color = owner && owner.color ? owner.color.main : '#38bdf8';
+        const px = OFFSET_X + c * CELL_SIZE;
+        const py = OFFSET_Y + r * CELL_SIZE;
+
+        // 3D cell block
+        ctx.fillStyle = hexToRgba(color, 0.45);
+        ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE);
+
+        ctx.strokeStyle = hexToRgba(color, 0.8);
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(px, py, CELL_SIZE, CELL_SIZE);
+      }
     }
+  }
+}
+
+function drawTrails() {
+  allPlayers.forEach(p => {
+    if (!p.isAlive || !p.trail || p.trail.length === 0) return;
+    const col = p.color || { main: '#3b82f6', dark: '#1d4ed8', light: '#93c5fd' };
+
+    p.trail.forEach(pt => {
+      const px = OFFSET_X + pt.c * CELL_SIZE;
+      const py = OFFSET_Y + pt.r * CELL_SIZE;
+
+      // 3D raised neon ribbon/wall
+      ctx.fillStyle = col.dark;
+      ctx.fillRect(px, py + 2, CELL_SIZE, CELL_SIZE - 2);
+
+      ctx.fillStyle = col.light;
+      ctx.fillRect(px, py, CELL_SIZE, CELL_SIZE - 2);
+
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px, py, CELL_SIZE, CELL_SIZE - 2);
+    });
   });
 }
 
-function drawPlayer(player, isCurrent) {
-  context.save();
-  context.fillStyle = isCurrent ? '#4ade80' : '#f87171';
-  context.fillRect(player.x, player.y, 30, 30);
+function drawPlayerAvatar(player, isMe, isLeader, time) {
+  if (!player.isAlive) return;
 
-  context.strokeStyle = isCurrent ? '#166534' : '#991b1b';
-  context.lineWidth = 2;
-  context.strokeRect(player.x, player.y, 30, 30);
+  const col = player.color || { main: '#3b82f6', dark: '#1d4ed8', light: '#93c5fd' };
+  const size = 18;
+  const bob = Math.sin(time / 140) * 2;
+  const x = player.x - size / 4;
+  const y = player.y - size / 4 + bob;
 
-  context.fillStyle = '#ffffff';
-  context.fillRect(player.x + 5, player.y + 6, 6, 6);
-  context.fillRect(player.x + 19, player.y + 6, 6, 6);
-  context.fillStyle = '#0f172a';
-  context.fillRect(player.x + 7, player.y + 8, 3, 3);
-  context.fillRect(player.x + 21, player.y + 8, 3, 3);
+  // 3D Extruded Cube Head
+  draw3DBox(x, y, size, size, 4, col.main, col.dark, col.dark);
 
-  context.fillStyle = '#0f172a';
-  context.fillRect(player.x + 8, player.y + 20, 14, 3);
+  // Eyes based on direction
+  ctx.fillStyle = '#ffffff';
+  let eyeX1 = x + 3, eyeY1 = y + 4, eyeX2 = x + 11, eyeY2 = y + 4;
+  let pupilDx = 0, pupilDy = 0;
 
-  context.fillStyle = '#e2e8f0';
-  context.font = '8px "Press Start 2P", monospace';
-  context.textAlign = 'center';
-  const label = isCurrent ? 'YOU' : `P-${player.id ? player.id.slice(0, 4) : ''}`;
-  context.fillText(label, player.x + 15, player.y - 6);
-  context.restore();
+  if (player.dir === 'right') { eyeX1 += 4; eyeX2 += 4; pupilDx = 1.5; }
+  if (player.dir === 'left') { pupilDx = -1.5; }
+  if (player.dir === 'up') { eyeY1 -= 2; eyeY2 -= 2; pupilDy = -1.5; }
+  if (player.dir === 'down') { eyeY1 += 4; eyeY2 += 4; pupilDy = 1.5; }
+
+  ctx.fillRect(eyeX1, eyeY1, 4, 4);
+  ctx.fillRect(eyeX2, eyeY2, 4, 4);
+
+  // Pupils
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(eyeX1 + 1 + pupilDx, eyeY1 + 1 + pupilDy, 2, 2);
+  ctx.fillRect(eyeX2 + 1 + pupilDx, eyeY2 + 1 + pupilDy, 2, 2);
+
+  // Floating 3D Golden Crown for Leader
+  if (isLeader && player.score > 0) {
+    const crownY = y - 10 + Math.sin(time / 120) * 2;
+    ctx.fillStyle = '#f59e0b';
+    ctx.beginPath();
+    ctx.moveTo(x + 2, crownY + 6);
+    ctx.lineTo(x + 2, crownY);
+    ctx.lineTo(x + 6, crownY + 3);
+    ctx.lineTo(x + 9, crownY - 2);
+    ctx.lineTo(x + 12, crownY + 3);
+    ctx.lineTo(x + 16, crownY);
+    ctx.lineTo(x + 16, crownY + 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = '#78350f';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Player Name Tag
+  ctx.font = '7px "Press Start 2P", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = isMe ? '#4ade80' : '#e2e8f0';
+  const label = isMe ? 'YOU' : `P-${player.id ? player.id.slice(0, 3) : ''}`;
+  ctx.fillText(label, x + size / 2, y - 12);
 }
 
-function drawCollectible(item) {
+function draw3DCollectible(item, time) {
   if (!item) return;
-  context.save();
-  context.fillStyle = '#fbbf24';
-  context.beginPath();
-  context.arc(item.x + 7.5, item.y + 7.5, 9, 0, Math.PI * 2);
-  context.fill();
+  const rot = (time / 300) % (Math.PI * 2);
+  const cx = item.x + 7.5;
+  const cy = item.y + 7.5 + Math.sin(time / 180) * 3;
 
-  context.strokeStyle = '#b45309';
-  context.lineWidth = 2;
-  context.stroke();
+  // Drop shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(cx, item.y + 16, 8, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
 
-  context.fillStyle = '#78350f';
-  context.font = '10px "Press Start 2P", monospace';
-  context.textAlign = 'center';
-  context.textBaseline = 'middle';
-  context.fillText('$', item.x + 7.5, item.y + 8.5);
-  context.restore();
+  // 3D Gem Shape
+  ctx.save();
+  ctx.translate(cx, cy);
+
+  ctx.fillStyle = '#facc15';
+  ctx.beginPath();
+  ctx.moveTo(0, -9);
+  ctx.lineTo(7, -2);
+  ctx.lineTo(0, 9);
+  ctx.lineTo(-7, -2);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = '#eab308';
+  ctx.beginPath();
+  ctx.moveTo(0, -9);
+  ctx.lineTo(7, -2);
+  ctx.lineTo(0, 9);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = '#854d0e';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.restore();
 }
 
-function render() {
-  handleMovement();
+function render(timestamp) {
+  const time = timestamp || Date.now();
 
-  context.fillStyle = '#0f172a';
-  context.fillRect(0, 0, canvas.width, canvas.height);
+  // Background Arena (3D Dark Grid)
+  ctx.fillStyle = '#090d16';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  context.strokeStyle = '#334155';
-  context.lineWidth = 4;
-  context.strokeRect(4, 50, canvas.width - 8, canvas.height - 54);
+  // 3D Arena Board
+  const boardW = COLS * CELL_SIZE;
+  const boardH = ROWS * CELL_SIZE;
 
-  drawCollectible(collectible);
+  // Board Depth Shadow & Front Edge
+  ctx.fillStyle = '#030712';
+  ctx.fillRect(OFFSET_X, OFFSET_Y + boardH, boardW, 8);
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(OFFSET_X, OFFSET_Y, boardW, boardH);
+
+  // Perspective Grid Lines
+  ctx.strokeStyle = 'rgba(51, 65, 85, 0.4)';
+  ctx.lineWidth = 0.5;
+  for (let c = 0; c <= COLS; c += 5) {
+    const gx = OFFSET_X + c * CELL_SIZE;
+    ctx.beginPath();
+    ctx.moveTo(gx, OFFSET_Y);
+    ctx.lineTo(gx, OFFSET_Y + boardH);
+    ctx.stroke();
+  }
+  for (let r = 0; r <= ROWS; r += 5) {
+    const gy = OFFSET_Y + r * CELL_SIZE;
+    ctx.beginPath();
+    ctx.moveTo(OFFSET_X, gy);
+    ctx.lineTo(OFFSET_X + boardW, gy);
+    ctx.stroke();
+  }
+
+  // Draw Arena Components
+  drawTerritory();
+  drawTrails();
+  draw3DCollectible(collectible, time);
+
+  // Determine Leader
+  const sorted = [...allPlayers].sort((a, b) => b.score - a.score);
+  const leaderId = sorted[0] ? sorted[0].id : null;
 
   allPlayers.forEach(p => {
-    drawPlayer(p, currPlayer && p.id === currPlayer.id);
+    drawPlayerAvatar(p, p.id === myId, p.id === leaderId, time);
   });
 
-  context.fillStyle = '#1e293b';
-  context.fillRect(0, 0, canvas.width, 50);
+  // HUD Top Bar
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, canvas.width, 50);
 
-  context.font = '10px "Press Start 2P", monospace';
-  context.textAlign = 'left';
-  context.fillStyle = '#38bdf8';
+  // 1-Minute Countdown Timer Badge (3D Center Pill)
+  const timerSec = Math.max(0, roundTime);
+  const timerColor = timerSec <= 10 ? '#ef4444' : '#38bdf8';
 
-  if (currPlayer) {
-    context.fillText(`Controls: WASD / Arrows`, 12, 22);
-    context.fillStyle = '#facc15';
-    context.fillText(`Score: ${currPlayer.score}`, 12, 38);
+  ctx.fillStyle = '#1e293b';
+  ctx.fillRect(canvas.width / 2 - 60, 8, 120, 32);
+  ctx.strokeStyle = timerColor;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(canvas.width / 2 - 60, 8, 120, 32);
 
-    context.textAlign = 'right';
-    context.fillStyle = '#4ade80';
-    const rankStr = currPlayer.calculateRank(allPlayers);
-    context.fillText(rankStr, canvas.width - 12, 22);
+  ctx.font = '12px "Press Start 2P", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = timerColor;
+  const min = Math.floor(timerSec / 60);
+  const sec = timerSec % 60;
+  const timeStr = `${min}:${sec < 10 ? '0' : ''}${sec}`;
+  ctx.fillText(timeStr, canvas.width / 2, 29);
 
-    context.fillStyle = '#94a3b8';
-    context.fillText(`Players: ${allPlayers.length}`, canvas.width - 12, 38);
+  // Left Info: My Score & Rank
+  const me = allPlayers.find(p => p.id === myId);
+  ctx.font = '8px "Press Start 2P", monospace';
+  ctx.textAlign = 'left';
+
+  if (me) {
+    const totalCells = COLS * ROWS;
+    const pct = ((me.score / totalCells) * 100).toFixed(1);
+    ctx.fillStyle = '#4ade80';
+    ctx.fillText(`Territory: ${pct}% (${me.score})`, 14, 22);
+
+    ctx.fillStyle = '#facc15';
+    ctx.fillText(me.calculateRank(allPlayers), 14, 38);
   } else {
-    context.fillText('Connecting to server...', 12, 30);
+    ctx.fillStyle = '#94a3b8';
+    ctx.fillText('Connecting...', 14, 30);
+  }
+
+  // Right Info: Leader & Online Count
+  ctx.textAlign = 'right';
+  if (sorted[0]) {
+    const leadPct = ((sorted[0].score / (COLS * ROWS)) * 100).toFixed(1);
+    ctx.fillStyle = '#fbbf24';
+    ctx.fillText(`Top: ${leadPct}%`, canvas.width - 14, 22);
+  }
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillText(`Players: ${allPlayers.length}`, canvas.width - 14, 38);
+
+  // Round Ended Overlay Banner
+  if (roundStatus === 'ended') {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(canvas.width / 2 - 170, canvas.height / 2 - 60, 340, 120);
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(canvas.width / 2 - 170, canvas.height / 2 - 60, 340, 120);
+
+    ctx.textAlign = 'center';
+    ctx.font = '14px "Press Start 2P", monospace';
+    ctx.fillStyle = '#facc15';
+    ctx.fillText('ROUND ENDED!', canvas.width / 2, canvas.height / 2 - 25);
+
+    ctx.font = '9px "Press Start 2P", monospace';
+    ctx.fillStyle = '#ffffff';
+    if (winnerInfo) {
+      const isWinnerMe = winnerInfo.id === myId;
+      const winText = isWinnerMe ? 'YOU WON THE TERRITORY!' : `WINNER: Player ${winnerInfo.id.slice(0, 4)}`;
+      ctx.fillText(winText, canvas.width / 2, canvas.height / 2 + 5);
+      ctx.fillStyle = '#4ade80';
+      ctx.fillText(`Final Territory: ${winnerInfo.score} cells`, canvas.width / 2, canvas.height / 2 + 25);
+    } else {
+      ctx.fillText('No territory claimed!', canvas.width / 2, canvas.height / 2 + 10);
+    }
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '7px "Press Start 2P", monospace';
+    ctx.fillText('New round starting in 5s...', canvas.width / 2, canvas.height / 2 + 45);
   }
 
   requestAnimationFrame(render);
